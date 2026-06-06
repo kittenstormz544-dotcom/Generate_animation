@@ -56,6 +56,7 @@ print(f"✓ Connected to Supabase: {SUPABASE_URL}")
 # ACTION MAPPING
 # ============================================
 ACTION_PROMPTS = {
+    "walk": "character walking smoothly",
     "walk left": "character walking to the left",
     "walk right": "character walking to the right",
     "walk forward": "character walking towards camera",
@@ -88,6 +89,12 @@ ACTION_PROMPTS = {
     "run": "character running",
     "sit upset": "character sitting upset",
     "sits down upsettedly": "character sitting down upset",
+    "looks": "character looking around",
+    "look": "character looking",
+    "look up": "character looking up",
+    "look down": "character looking down",
+    "looks up": "character looking up",
+    "looks down": "character looking down",
 }
 
 # ============================================
@@ -125,7 +132,7 @@ def update_generation_status(generation_id, status, video_url=None, error=None):
     
     data = {
         "status": status,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.now().isoformat(),
     }
     
     if video_url:
@@ -198,6 +205,22 @@ def upload_video_to_supabase(video_path, generation_id):
 # ANIMATION GENERATION
 # ============================================
 
+def parse_action(action):
+    """Parse action - can be string or dict"""
+    if isinstance(action, dict):
+        # Extract verb from dict
+        verb = action.get("verb", "").lower()
+        direction = action.get("direction", "").lower()
+        
+        # Combine verb and direction
+        if direction:
+            return f"{verb} {direction}"
+        else:
+            return verb
+    else:
+        # Already a string
+        return str(action).lower()
+
 def generate_animation(character_image_path, actions, character_name, output_path):
     """Generate animation using PIL and OpenCV"""
     try:
@@ -213,12 +236,14 @@ def generate_animation(character_image_path, actions, character_name, output_pat
         total_frames = len(actions) * 72  # 72 frames per action (3 seconds at 24fps)
         
         for action_idx, action in enumerate(actions):
-            print(f"    Action {action_idx + 1}/{len(actions)}: {action}")
+            # Parse action (handle both string and dict formats)
+            parsed_action = parse_action(action)
+            print(f"    Action {action_idx + 1}/{len(actions)}: {parsed_action}")
             
             # Generate 72 frames per action (3 seconds at 24fps)
             for frame_idx in range(72):
                 # Create frame from character image
-                frame = apply_action_effect(character, action, frame_idx, 72)
+                frame = apply_action_effect(character, parsed_action, frame_idx, 72)
                 frames.append(frame)
                 frame_count += 1
                 
@@ -247,7 +272,7 @@ def apply_action_effect(image, action, frame_index, total_frames):
     """Apply animation effects based on action"""
     try:
         frame = image.copy()
-        action_lower = action.lower()
+        action_lower = str(action).lower()
         progress = frame_index / total_frames  # 0 to 1
         
         # Horizontal movement (walk, run)
@@ -261,9 +286,6 @@ def apply_action_effect(image, action, frame_index, total_frames):
                 scale_factor = 1.0 + (progress * 0.1)
                 new_size = (int(frame.width * scale_factor), int(frame.height * scale_factor))
                 frame = frame.resize(new_size, Image.LANCZOS)
-                # Center it
-                offset_x = (new_size[0] - frame.width) // 2
-                offset_y = (new_size[1] - frame.height) // 2
                 return frame
             else:
                 # backward
@@ -345,6 +367,32 @@ def apply_action_effect(image, action, frame_index, total_frames):
                 Image.BILINEAR
             )
         
+        # Look (head tilt)
+        elif "look" in action_lower:
+            if "up" in action_lower:
+                offset = int(-progress * 20)
+            elif "down" in action_lower:
+                offset = int(progress * 20)
+            else:
+                offset = int(np.sin(progress * np.pi * 2) * 10)
+            
+            frame = frame.transform(
+                frame.size,
+                Image.AFFINE,
+                (1, 0, 0, 0, 1, offset),
+                Image.BILINEAR
+            )
+        
+        # Shrug
+        elif "shrug" in action_lower:
+            offset = int(np.sin(progress * np.pi * 3) * 3)
+            frame = frame.transform(
+                frame.size,
+                Image.AFFINE,
+                (1, 0, 0, 0, 1, -offset),
+                Image.BILINEAR
+            )
+        
         # Default: slight wobble
         else:
             offset = int(np.sin(progress * np.pi * 2) * 3)
@@ -358,7 +406,7 @@ def apply_action_effect(image, action, frame_index, total_frames):
         return frame
     
     except Exception as e:
-        print(f"  ❌ Error applying effect: {e}")
+        print(f"  ⚠ Warning in apply_action_effect: {e}")
         return image
 
 def create_video_from_frames(frames, output_path, fps=24):
