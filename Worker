@@ -1,0 +1,402 @@
+"""
+Kaggle Animation Engine
+Watches Supabase for pending generations and creates animations
+"""
+
+import os
+import json
+import time
+import requests
+import subprocess
+from pathlib import Path
+from datetime import datetime
+import torch
+import cv2
+import numpy as np
+from PIL import Image
+import tempfile
+import uuid
+
+# Force GPU
+print(f"GPU Available: {torch.cuda.is_available()}")
+print(f"GPU Name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    device = "cuda"
+else:
+    device = "cpu"
+
+# Get Supabase credentials from Kaggle environment
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise ValueError("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY in environment")
+
+print(f"Connected to Supabase: {SUPABASE_URL}")
+
+# ============================================
+# ACTION MAPPING (Verbs to Animation Prompts)
+# ============================================
+
+ACTION_PROMPTS = {
+    "walk left": "character walking to the left, smooth motion",
+    "walk right": "character walking to the right, smooth motion",
+    "walk forward": "character walking towards camera, smooth motion",
+    "walk backward": "character walking away from camera, smooth motion",
+    "jump": "character jumping up high, energetic motion",
+    "wave": "character waving hand friendly, cheerful",
+    "sit down": "character sitting down smoothly",
+    "sit": "character sitting, relaxed",
+    "stand up": "character standing up from sitting",
+    "point": "character pointing finger forward",
+    "spin": "character spinning around, full rotation",
+    "nod": "character nodding head yes",
+    "shake": "character shaking head no",
+    "shrug": "character shrugging shoulders",
+    "sad": "character looking sad, downcast",
+    "happy": "character smiling and looking happy",
+    "angry": "character looking angry, upset",
+    "surprised": "character looking surprised, shocked",
+    "confused": "character looking confused, puzzled",
+    "excited": "character looking excited, energetic",
+    "tired": "character looking tired, exhausted",
+    "dance": "character dancing, moving rhythmically",
+    "clap": "character clapping hands",
+    "thumbs up": "character giving thumbs up",
+    "thumbs down": "character giving thumbs down",
+}
+
+# ============================================
+# SUPABASE FUNCTIONS
+# ============================================
+
+def get_pending_generations():
+    """Fetch pending generations from Supabase"""
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+    
+    url = f"{SUPABASE_URL}/rest/v1/generations?status=eq.pending&limit=1"
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"Error fetching pending generations: {e}")
+        return []
+
+def update_generation_status(generation_id, status, video_url=None, error=None):
+    """Update generation status in Supabase"""
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+    
+    data = {
+        "status": status,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    
+    if video_url:
+        data["video_url"] = video_url
+    
+    if error:
+        data["error_message"] = error
+    
+    url = f"{SUPABASE_URL}/rest/v1/generations?id=eq.{generation_id}"
+    
+    try:
+        response = requests.patch(url, json=data, headers=headers)
+        response.raise_for_status()
+        print(f"Updated generation {generation_id} to {status}")
+    except Exception as e:
+        print(f"Error updating generation status: {e}")
+
+def download_image_from_url(image_url):
+    """Download character image from URL"""
+    try:
+        response = requests.get(image_url, timeout=30)
+        response.raise_for_status()
+        
+        # Save to temporary file
+        temp_path = f"/tmp/character_{uuid.uuid4()}.png"
+        with open(temp_path, "wb") as f:
+            f.write(response.content)
+        
+        return temp_path
+    except Exception as e:
+        print(f"Error downloading image: {e}")
+        return None
+
+def upload_video_to_supabase(video_path, generation_id):
+    """Upload generated video to Supabase Storage"""
+    try:
+        with open(video_path, "rb") as f:
+            video_data = f.read()
+        
+        # Upload to storage
+        filename = f"generation_{generation_id}.mp4"
+        headers = {
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        }
+        
+        url = f"{SUPABASE_URL}/storage/v1/object/generated-videos/{filename}"
+        
+        response = requests.post(url, headers=headers, data=video_data)
+        response.raise_for_status()
+        
+        # Get public URL
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/generated-videos/{filename}"
+        print(f"Video uploaded: {public_url}")
+        
+        return public_url
+    except Exception as e:
+        print(f"Error uploading video: {e}")
+        return None
+
+# ============================================
+# ANIMATION GENERATION
+# ============================================
+
+def generate_animation(character_image_path, actions, character_name, output_path):
+    """
+    Generate animation using AnimateDiff
+    actions: list of action strings (e.g., ["walk left", "wave", "jump"])
+    """
+    try:
+        # Install AnimateDiff if needed
+        try:
+            import animatediff
+        except:
+            print("Installing AnimateDiff...")
+            subprocess.check_call([
+                "pip", "install", "-q", 
+                "git+https://github.com/guoyww/AnimateDiff.git"
+            ])
+        
+        print(f"Generating animation for {character_name}")
+        print(f"Actions: {actions}")
+        print(f"Using device: {device}")
+        
+        # For now, create a simple animated video by repeating frames
+        # This is a placeholder - replace with actual AnimateDiff integration
+        frames = generate_frames(character_image_path, actions, character_name)
+        
+        # Create video from frames
+        create_video_from_frames(frames, output_path, fps=24)
+        
+        print(f"Animation saved to {output_path}")
+        return True
+    
+    except Exception as e:
+        print(f"Error generating animation: {e}")
+        return False
+
+def generate_frames(image_path, actions, character_name, frames_per_action=72):
+    """
+    Generate frames for animation
+    72 frames at 24fps = 3 seconds per action
+    """
+    try:
+        base_image = Image.open(image_path).convert("RGBA")
+        frames = []
+        
+        for action in actions:
+            print(f"Generating frames for action: {action}")
+            
+            # Get animation prompt
+            prompt = ACTION_PROMPTS.get(action.lower(), action)
+            
+            # For now, create simple frame variations
+            # This will be replaced with actual ML model
+            for i in range(frames_per_action):
+                # Create a copy of the base image
+                frame = base_image.copy()
+                
+                # Apply simple transformations based on action
+                # (This is placeholder - real animation would use ML models)
+                frame = apply_action_effect(frame, action, i, frames_per_action)
+                
+                frames.append(frame)
+        
+        return frames
+    
+    except Exception as e:
+        print(f"Error generating frames: {e}")
+        return []
+
+def apply_action_effect(image, action, frame_index, total_frames):
+    """Apply simple visual effects based on action"""
+    # Placeholder for actual animation effects
+    # Real implementation would use ML models or keyframe animation
+    
+    action_lower = action.lower()
+    frame = image.copy()
+    
+    # Simple effects
+    if "walk" in action_lower:
+        # Horizontal offset for walking
+        direction = 1 if "left" not in action_lower else -1
+        offset = int((frame_index / total_frames) * 50 * direction)
+        frame = frame.transform(
+            frame.size,
+            Image.AFFINE,
+            (1, 0, offset, 0, 1, 0),
+            Image.BILINEAR
+        )
+    
+    elif "jump" in action_lower:
+        # Vertical offset for jumping
+        offset = int(abs(np.sin(frame_index / total_frames * np.pi)) * 30)
+        frame = frame.transform(
+            frame.size,
+            Image.AFFINE,
+            (1, 0, 0, 0, 1, -offset),
+            Image.BILINEAR
+        )
+    
+    elif "spin" in action_lower:
+        # Rotation for spinning
+        angle = (frame_index / total_frames) * 360
+        frame = frame.rotate(angle, expand=False, resample=Image.BILINEAR)
+    
+    elif "wave" in action_lower:
+        # Subtle horizontal oscillation
+        offset = int(np.sin(frame_index / total_frames * np.pi * 4) * 5)
+        frame = frame.transform(
+            frame.size,
+            Image.AFFINE,
+            (1, 0, offset, 0, 1, 0),
+            Image.BILINEAR
+        )
+    
+    return frame
+
+def create_video_from_frames(frames, output_path, fps=24):
+    """Create MP4 video from frames"""
+    if not frames:
+        print("No frames to create video")
+        return False
+    
+    try:
+        # Get frame dimensions
+        frame_width, frame_height = frames[0].size
+        
+        # Create video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(
+            output_path,
+            fourcc,
+            fps,
+            (frame_width, frame_height)
+        )
+        
+        # Write frames
+        for frame in frames:
+            # Convert PIL image to numpy array
+            frame_np = np.array(frame.convert("RGB"))
+            # Convert RGB to BGR for OpenCV
+            frame_bgr = cv2.cvtColor(frame_np, cv2.COLOR_RGB2BGR)
+            out.write(frame_bgr)
+        
+        out.release()
+        print(f"Video created: {output_path}")
+        return True
+    
+    except Exception as e:
+        print(f"Error creating video: {e}")
+        return False
+
+# ============================================
+# MAIN ENGINE LOOP
+# ============================================
+
+def main():
+    """Main engine loop"""
+    print("Starting Animation Engine...")
+    print(f"Device: {device}")
+    
+    while True:
+        try:
+            # Check for pending generations
+            pending = get_pending_generations()
+            
+            if pending:
+                generation = pending[0]
+                generation_id = generation["id"]
+                character_name = generation["character_name"]
+                character_image_url = generation["character_image_url"]
+                parsed_actions = generation.get("parsed_actions", [])
+                
+                print(f"\n{'='*50}")
+                print(f"Processing generation {generation_id}")
+                print(f"Character: {character_name}")
+                print(f"Actions: {parsed_actions}")
+                print(f"{'='*50}\n")
+                
+                # Download character image
+                image_path = download_image_from_url(character_image_url)
+                if not image_path:
+                    update_generation_status(
+                        generation_id, 
+                        "failed",
+                        error="Failed to download character image"
+                    )
+                    continue
+                
+                # Generate animation
+                temp_video_path = f"/tmp/animation_{generation_id}.mp4"
+                success = generate_animation(
+                    image_path,
+                    parsed_actions,
+                    character_name,
+                    temp_video_path
+                )
+                
+                if success and os.path.exists(temp_video_path):
+                    # Upload to Supabase
+                    video_url = upload_video_to_supabase(temp_video_path, generation_id)
+                    
+                    if video_url:
+                        # Update status to complete
+                        update_generation_status(
+                            generation_id,
+                            "complete",
+                            video_url=video_url
+                        )
+                    else:
+                        update_generation_status(
+                            generation_id,
+                            "failed",
+                            error="Failed to upload video"
+                        )
+                    
+                    # Cleanup
+                    try:
+                        os.remove(temp_video_path)
+                        os.remove(image_path)
+                    except:
+                        pass
+                else:
+                    update_generation_status(
+                        generation_id,
+                        "failed",
+                        error="Failed to generate animation"
+                    )
+            
+            else:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Waiting for pending generations...")
+                time.sleep(5)
+        
+        except Exception as e:
+            print(f"Engine error: {e}")
+            time.sleep(5)
+
+if __name__ == "__main__":
+    main()
